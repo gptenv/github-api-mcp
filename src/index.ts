@@ -325,7 +325,12 @@ export default {
       if (rpc.method === "ping") return json({ jsonrpc: "2.0", id, result: {} });
       if (rpc.method === "tools/list") {
         const [rest, gql] = await Promise.all([getRestTools(), getGraphqlTools(env)]);
-        const all = [...rest, ...gql, actionsLogsTool()].sort((a, b) => a.name.localeCompare(b.name));
+        const priority = ["github_rest_request", "github_graphql_request", "github_graphql_introspect_schema", "github_actions_read_logs"];
+        const all = [...rest, ...gql, actionsLogsTool()].sort((a, b) => {
+          const ai = priority.indexOf(a.name), bi = priority.indexOf(b.name);
+          const ap = ai < 0 ? priority.length : ai, bp = bi < 0 ? priority.length : bi;
+          return ap - bp || a.name.localeCompare(b.name);
+        });
         const pageSize = Math.min(100, Math.max(1, Number(env.MCP_TOOL_PAGE_SIZE || 80)));
         const offset = Math.max(0, Number.parseInt(rpc.params?.cursor || "0", 10) || 0);
         return json({ jsonrpc: "2.0", id, result: { tools: all.slice(offset, offset + pageSize), ...(offset + pageSize < all.length ? { nextCursor: String(offset + pageSize) } : {}) } });
