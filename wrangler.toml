@@ -1,0 +1,8 @@
+name = "github-api-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-10-15"
+workers_dev = true
+
+[vars]
+GITHUB_API_VERSION = "2022-11-28"
+MCP_TOOL_PAGE_SIZE = "80"
