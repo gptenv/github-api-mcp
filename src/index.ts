@@ -276,7 +276,7 @@ export default {
     if (url.pathname === "/health" && request.method === "GET") return json({ ok: true, service: "github-api-mcp", version: "3.0.0", authRequired: true });
     if (!authenticate(request, env)) return json({ error: "Unauthorized" }, 401, { "www-authenticate": "Bearer" });
     if (url.pathname.startsWith("/git/")) {
-      const match = url.pathname.match(/^\\/git\\/([A-Za-z0-9_.-]+)\\/([A-Za-z0-9_.-]+\\.git)(\\/.*)?$/);
+      const match = url.pathname.match(/^\/git\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+\.git)(\/.*)?$/);
       if (!match) return json({ error: "Expected /git/OWNER/REPO.git/..." }, 400);
       const owner = match[1], repository = match[2], suffix = match[3] || "";
       const service = url.searchParams.get("service");
