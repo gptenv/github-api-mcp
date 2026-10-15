@@ -6,8 +6,17 @@ Cloudflare Worker exposing a remote MCP server with dynamically generated, seman
 
 - **REST:** Loads GitHub's official OpenAPI description and generates a named MCP tool for each documented HTTP operation. The catalogue is paginated using MCP `nextCursor`. The universal `github_rest_request` invokes any `api.github.com` REST route, including routes absent from the specification. Supported methods: GET, POST, PUT, PATCH, DELETE, HEAD.
 - **GraphQL:** Introspects the live GitHub GraphQL schema and creates semantic tools for each root Query and Mutation field. `github_graphql_request` accepts arbitrary queries and mutations, variables and operationName; use it for nested fields, input objects, fragments, aliases, directives, connections and GraphQL-only functionality. `github_graphql_introspect_schema` inspects types, fields, arguments, enums, input objects, interfaces and unions.
-- **Actions and Git metadata:** REST fallback can invoke workflow runs/jobs, artifacts, log downloads, branches, tags, refs, commits, Git objects and compare endpoints. Actions logs may redirect to a temporary archive URL; very large archives should be fetched per job or with a future bounded log-extraction helper.
-- **Clone:** This initial version does not implement Git Smart HTTP, so it cannot proxy a real history-preserving `git clone`. Use a normal Git client in a trusted development environment. Repository snapshots can be obtained through GitHub's archive REST routes.
+- **Actions logs:** `github_actions_read_logs` downloads a workflow-run or job log ZIP through GitHub's temporary redirect, decompresses it, and supports `list`, `read` with line ranges, and `search` across files. Archives above 25 MiB compressed are rejected; use job-level logs to narrow the request.
+- **Git metadata and all REST routes:** `github_rest_request` covers workflow runs/jobs, artifacts, reruns, branches, tags, refs, commits, Git objects, compare endpoints and any other REST route, including routes omitted from OpenAPI.
+- **Clone/fetch:** The read-only `/git/OWNER/REPO.git` proxy supports Git Smart HTTP `git-upload-pack`, enabling a real history-preserving clone/fetch. Push/receive-pack is blocked. Example:
+
+  ```bash
+  export WORKER_URL='https://github-api-mcp.<your-account-subdomain>.workers.dev'
+  export ACCESS_KEY='your-worker-access-key'
+  git -c http.extraheader="Authorization: Bearer ${ACCESS_KEY}" clone "${WORKER_URL}/git/OWNER/REPO.git"
+  ```
+
+  The Worker authenticates upstream using its secret `GITHUB_TOKEN`; your GitHub token is not exposed to Git. Use the canonical owner/repository name because upstream redirects are rejected for safety. Repository snapshots are also available through GitHub archive REST routes.
 
 GraphQL isn't a REST route list: arbitrary GraphQL execution plus schema introspection is what provides broad coverage beyond REST. Generated root-field tools improve discovery; the generic executor preserves access to the full query language. Tool pagination depends on the client honoring MCP `nextCursor`; if it does not, the generic tools remain available on the first page.
 
