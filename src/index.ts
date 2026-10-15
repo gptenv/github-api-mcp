@@ -173,7 +173,7 @@ async function inspectActionsLogs(args: any, env: Env): Promise<unknown> {
     const pattern = String(args.pattern || "");
     if (!pattern) throw new Error("pattern is required for action=search");
     let re: RegExp;
-    try { re = new RegExp(pattern, "i"); } catch { re = new RegExp(pattern.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&"), "i"); } catch { re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\function graphqlFallbackTool(): Tool {"), "i"); }
+    try { re = new RegExp(pattern, "i"); } catch { re = new RegExp(pattern.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&"), "i"); }
     const matches: Array<{ file: string; line: number; text: string }> = [];
     const max = Math.min(200, Math.max(1, Number(args.max_matches || 100)));
     for (const f of entries) {
