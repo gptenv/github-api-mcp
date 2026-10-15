@@ -111,7 +111,8 @@ async function getGraphqlTools(env: Env): Promise<Tool[]> {
         const required: string[] = [];
         for (const a of f.args || []) {
           const t = unwrapType(a.type);
-          const type = t.name === "Int" || t.name === "Float" ? "number" : t.name === "Boolean" ? "boolean" : t.kind === "INPUT_OBJECT" ? "object" : t.kind === "LIST" ? "array" : "string";
+          const isList = a.type?.kind === "LIST" || (a.type?.kind === "NON_NULL" && a.type?.ofType?.kind === "LIST");
+          const type = isList ? "array" : t.name === "Int" || t.name === "Float" ? "number" : t.name === "Boolean" ? "boolean" : t.kind === "INPUT_OBJECT" ? "object" : "string";
           properties[a.name] = { type, ...(type === "object" ? { additionalProperties: true } : type === "array" ? { items: {} } : {}), description: a.description || `GraphQL argument ${a.name} (${t.name || "input object"}); arbitrary nested inputs are also accepted by github_graphql_request.` };
           if (a.type?.kind === "NON_NULL") required.push(a.name);
         }
@@ -194,7 +195,7 @@ async function inspectActionsLogs(args: any, env: Env): Promise<unknown> {
 function graphqlFallbackTool(): Tool {
   return { name: "github_graphql_request", description: "Execute any GitHub GraphQL query or mutation with variables and operationName. This is the complete-coverage fallback for all GraphQL fields, nested fields, input objects, enums, fragments, aliases, directives, pagination, and functionality not available in REST.", inputSchema: { type: "object", properties: { query: { type: "string" }, variables: { type: "object", additionalProperties: true }, operationName: { type: "string" } }, required: ["query"], additionalProperties: false } };
 }
-function ghHeaders(env: Env, accept = "application/vnd.github+json"): HeadersInit {
+function ghHeaders(env: Env, accept = "application/vnd.github+json"): Record<string, string> {
   return { authorization: `Bearer ${env.GITHUB_TOKEN}`, accept, "x-github-api-version": env.GITHUB_API_VERSION || "2022-11-28", "user-agent": "github-api-mcp-cloudflare-worker", "content-type": "application/json" };
 }
 async function executeTool(name: string, args: any, env: Env): Promise<unknown> {
@@ -235,8 +236,17 @@ async function executeTool(name: string, args: any, env: Env): Promise<unknown> 
     }
     const response = await fetch(url.toString(), { method, headers: ghHeaders(env, args.accept), ...(args.body !== undefined ? { body: JSON.stringify(args.body) } : {}) });
     const contentType = response.headers.get("content-type") || "";
-    if (response.status === 204) return { status: 204, ok: response.ok };
-    const data = contentType.includes("json") ? await response.json() : contentType.includes("text") ? await response.text() : { base64: btoa(String.fromCharCode(...new Uint8Array(await response.arrayBuffer()))), contentType };
+    if (response.status === 204 || method === "HEAD") return { status: response.status, ok: response.ok, headers: { link: response.headers.get("link"), etag: response.headers.get("etag"), contentType } };
+    let data: unknown;
+    if (contentType.includes("json")) data = await response.json();
+    else if (contentType.includes("text")) data = await response.text();
+    else {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > 8 * 1024 * 1024) return { status: response.status, ok: response.ok, contentType, byteLength: bytes.byteLength, error: "Binary response exceeds 8 MiB inline limit; use a dedicated download/log tool or request a smaller resource" };
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length)));
+      data = { base64: btoa(binary), contentType, byteLength: bytes.byteLength };
+    }
     return { status: response.status, ok: response.ok, headers: { link: response.headers.get("link"), etag: response.headers.get("etag"), contentType }, data };
   }
   if (name === "github_graphql_request" || name.startsWith("github_graphql_query_") || name.startsWith("github_graphql_mutation_")) {
