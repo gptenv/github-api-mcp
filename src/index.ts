@@ -56,7 +56,7 @@ function schemaForParameters(params: any[]): Record<string, unknown> {
 async function getRestTools(): Promise<Tool[]> {
   if (restCache && Date.now() - restCache.at < CACHE_MS) return restCache.tools;
   try {
-    const r = await fetch(SPEC_URL, { headers: { accept: "application/vnd.github+json" }, cf: { cacheTtl: 1800, cacheEverything: true } as any });
+    const r = await fetch(SPEC_URL, { headers: { accept: "application/vnd.github+json" } });
     if (!r.ok) throw new Error("OpenAPI fetch failed: " + r.status);
     const spec: any = await r.json();
     const tools: Tool[] = [];
