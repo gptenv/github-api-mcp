@@ -140,12 +140,19 @@ async function executeTool(name: string, args: any, env: Env): Promise<unknown> 
     const method = name === "github_rest_request" ? String(args.method || "GET").toUpperCase() : name.slice("github_".length).split("_")[0].toUpperCase();
     // Operation-specific tools carry the route template as hidden metadata encoded in description.
     let path = args.path;
+    const pathParamNames = new Set<string>();
     if (name !== "github_rest_request") {
-      const match = generated.description.match(/GitHub REST: [A-Z]+ (\S+)\./);
+      const match = generated.description.match(/GitHub REST: [A-Z]+ (\\S+)\\./);
       path = match?.[1];
       if (!path) throw new Error("Could not resolve generated route");
-      for (const [key, value] of Object.entries(args)) if (!["body", "query"].includes(key)) path = path.replaceAll(`{${key}}`, encodeURIComponent(String(value)));
-      if (/\{[^}]+\}/.test(path)) throw new Error("Missing required path parameter(s): " + path.match(/\{[^}]+\}/g)?.join(", "));
+      for (const [key, value] of Object.entries(args)) {
+        if (["body", "query", "accept", "method", "path"].includes(key)) continue;
+        if (path.includes(`{${key}}`)) {
+          pathParamNames.add(key);
+          path = path.replaceAll(`{${key}}`, encodeURIComponent(String(value)));
+        }
+      }
+      if (/\\{[^}]+\\}/.test(path)) throw new Error("Missing required path parameter(s): " + path.match(/\\{[^}]+\\}/g)?.join(", "));
     }
     path = safePath(String(path || ""));
     const url = new URL(path, API);
@@ -155,7 +162,10 @@ async function executeTool(name: string, args: any, env: Env): Promise<unknown> 
       else if (v !== undefined && v !== null) url.searchParams.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
     }
     if (name !== "github_rest_request") {
-      for (const [k, v] of Object.entries(args)) if (!["body", "query"].includes(k) && !generated.inputSchema) { url.searchParams.set(k, String(v)); }
+      for (const [k, v] of Object.entries(args)) {
+        if (["body", "query", "accept", "method", "path"].includes(k) || pathParamNames.has(k)) continue;
+        if (v !== undefined && v !== null) url.searchParams.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
+      }
     }
     const response = await fetch(url.toString(), { method, headers: ghHeaders(env, args.accept), ...(args.body !== undefined ? { body: JSON.stringify(args.body) } : {}) });
     const contentType = response.headers.get("content-type") || "";
