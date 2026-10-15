@@ -173,7 +173,7 @@ async function inspectActionsLogs(args: any, env: Env): Promise<unknown> {
     const pattern = String(args.pattern || "");
     if (!pattern) throw new Error("pattern is required for action=search");
     let re: RegExp;
-    try { re = new RegExp(pattern, "i"); } catch { re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\function graphqlFallbackTool(): Tool {"), "i"); }
+    try { re = new RegExp(pattern, "i"); } catch { re = new RegExp(pattern.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&"), "i"); } catch { re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\function graphqlFallbackTool(): Tool {"), "i"); }
     const matches: Array<{ file: string; line: number; text: string }> = [];
     const max = Math.min(200, Math.max(1, Number(args.max_matches || 100)));
     for (const f of entries) {
@@ -275,6 +275,33 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/health" && request.method === "GET") return json({ ok: true, service: "github-api-mcp", version: "3.0.0", authRequired: true });
     if (!authenticate(request, env)) return json({ error: "Unauthorized" }, 401, { "www-authenticate": "Bearer" });
+    if (url.pathname.startsWith("/git/")) {
+      const match = url.pathname.match(/^\\/git\\/([A-Za-z0-9_.-]+)\\/([A-Za-z0-9_.-]+\\.git)(\\/.*)?$/);
+      if (!match) return json({ error: "Expected /git/OWNER/REPO.git/..." }, 400);
+      const owner = match[1], repository = match[2], suffix = match[3] || "";
+      const service = url.searchParams.get("service");
+      const isInfoRefs = suffix === "/info/refs" && request.method === "GET" && service === "git-upload-pack";
+      const isUploadPack = suffix === "/git-upload-pack" && request.method === "POST";
+      if (!isInfoRefs && !isUploadPack) return json({ error: "Read-only Git Smart HTTP only; git-upload-pack is supported, pushes are disabled" }, 405);
+      const upstream = new URL(`https://github.com/${owner}/${repository}${suffix}`);
+      if (isInfoRefs) upstream.searchParams.set("service", "git-upload-pack");
+      const headers = new Headers();
+      headers.set("authorization", "Basic " + btoa("x-access-token:" + env.GITHUB_TOKEN));
+      headers.set("user-agent", "github-api-mcp-cloudflare-worker");
+      for (const name of ["accept", "content-type", "git-protocol"]) {
+        const value = request.headers.get(name);
+        if (value) headers.set(name, value);
+      }
+      const upstreamResponse = await fetch(upstream.toString(), { method: request.method, headers, ...(request.method === "POST" ? { body: request.body } : {}), redirect: "manual" });
+      if (upstreamResponse.status >= 300 && upstreamResponse.status < 400) return json({ error: "GitHub returned a redirect; clone the canonical repository URL instead", status: upstreamResponse.status, location: upstreamResponse.headers.get("location") }, 502);
+      const outHeaders = new Headers();
+      for (const name of ["content-type", "cache-control", "expires", "pragma", "vary"]) {
+        const value = upstreamResponse.headers.get(name);
+        if (value) outHeaders.set(name, value);
+      }
+      outHeaders.set("cache-control", "no-store");
+      return new Response(upstreamResponse.body, { status: upstreamResponse.status, headers: outHeaders });
+    }
     if (url.pathname === "/mcp" && request.method === "POST") {
       let rpc: any;
       try { rpc = await request.json(); } catch { return json(rpcError(null, -32700, "Parse error"), 400); }
