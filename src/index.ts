@@ -1,3 +1,4 @@
+import { unzipSync } from "fflate";
 /**
  * GitHub API MCP — dynamic REST OpenAPI tools + GraphQL schema tools.
  * Secrets: ACCESS_KEY (required), GITHUB_TOKEN (required).
@@ -126,6 +127,66 @@ async function getGraphqlTools(env: Env): Promise<Tool[]> {
     return [graphqlFallbackTool(), { name: "github_graphql_introspect_schema", description: "Run GraphQL schema introspection for GitHub types and fields.", inputSchema: { type: "object", properties: { type_name: { type: "string" }, query: { type: "string" } } } }];
   }
 }
+function actionsLogsTool(): Tool {
+  return {
+    name: "github_actions_read_logs",
+    description: "Download and inspect real GitHub Actions logs for an entire workflow run or a single job. Automatically follows GitHub's temporary log-archive redirect, decompresses the ZIP, and supports listing log files, reading line ranges, and searching across all files. Use small line ranges for large logs.",
+    inputSchema: { type: "object", properties: {
+      owner: { type: "string" }, repo: { type: "string" },
+      run_id: { type: "string", description: "Workflow run ID; use this OR job_id" },
+      job_id: { type: "string", description: "Workflow job ID; use this OR run_id" },
+      action: { type: "string", enum: ["list", "read", "search"] },
+      file: { type: "string", description: "Exact archive filename for action=read" },
+      start_line: { type: "integer", minimum: 1 }, end_line: { type: "integer", minimum: 1 },
+      pattern: { type: "string", description: "Literal or case-insensitive regex pattern for action=search" },
+      max_matches: { type: "integer", minimum: 1, maximum: 200 }
+    }, required: ["owner", "repo", "action"], additionalProperties: false }
+  };
+}
+async function inspectActionsLogs(args: any, env: Env): Promise<unknown> {
+  const owner = String(args.owner || "");
+  const repo = String(args.repo || "");
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("Invalid owner or repository name");
+  if (!!args.run_id === !!args.job_id) throw new Error("Supply exactly one of run_id or job_id");
+  const id = String(args.run_id || args.job_id);
+  if (!/^\d+$/.test(id)) throw new Error("Run/job ID must be numeric");
+  const endpoint = args.job_id
+    ? `/repos/${owner}/${repo}/actions/jobs/${id}/logs`
+    : `/repos/${owner}/${repo}/actions/runs/${id}/logs`;
+  const response = await fetch(API + endpoint, { headers: { ...ghHeaders(env), accept: "application/vnd.github+json, application/zip" }, redirect: "follow" });
+  if (!response.ok) throw new Error(`GitHub log download failed (${response.status}): ${(await response.text()).slice(0, 2000)}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > 25 * 1024 * 1024) throw new Error("Log archive exceeds 25 MiB compressed limit; fetch individual job logs instead");
+  const files = unzipSync(bytes);
+  const entries = Object.entries(files).map(([name, data]) => ({ name, text: new TextDecoder("utf-8", { fatal: false }).decode(data) })).filter(x => !x.name.endsWith("/"));
+  const action = String(args.action);
+  if (action === "list") return { source: args.run_id ? "workflow-run" : "job", id, files: entries.map(f => ({ name: f.name, lines: f.text.split("\n").length, bytes: new TextEncoder().encode(f.text).length })) };
+  if (action === "read") {
+    const f = entries.find(x => x.name === args.file);
+    if (!f) throw new Error("Log file not found; call action=list and supply the exact file name");
+    const lines = f.text.split("\n");
+    const start = Math.max(1, Number(args.start_line || 1));
+    const end = Math.min(lines.length, Math.max(start, Number(args.end_line || start + 199)));
+    return { file: f.name, total_lines: lines.length, start_line: start, end_line: end, text: lines.slice(start - 1, end).join("\n") };
+  }
+  if (action === "search") {
+    const pattern = String(args.pattern || "");
+    if (!pattern) throw new Error("pattern is required for action=search");
+    let re: RegExp;
+    try { re = new RegExp(pattern, "i"); } catch { re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\function graphqlFallbackTool(): Tool {"), "i"); }
+    const matches: Array<{ file: string; line: number; text: string }> = [];
+    const max = Math.min(200, Math.max(1, Number(args.max_matches || 100)));
+    for (const f of entries) {
+      const lines = f.text.split("\n");
+      for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) {
+        matches.push({ file: f.name, line: i + 1, text: lines[i].slice(0, 2000) });
+        if (matches.length >= max) return { match_count: matches.length, truncated: true, matches };
+      }
+    }
+    return { match_count: matches.length, truncated: false, matches };
+  }
+  throw new Error("Unsupported log action");
+}
 function graphqlFallbackTool(): Tool {
   return { name: "github_graphql_request", description: "Execute any GitHub GraphQL query or mutation with variables and operationName. This is the complete-coverage fallback for all GraphQL fields, nested fields, input objects, enums, fragments, aliases, directives, pagination, and functionality not available in REST.", inputSchema: { type: "object", properties: { query: { type: "string" }, variables: { type: "object", additionalProperties: true }, operationName: { type: "string" } }, required: ["query"], additionalProperties: false } };
 }
@@ -133,6 +194,7 @@ function ghHeaders(env: Env, accept = "application/vnd.github+json"): HeadersIni
   return { authorization: `Bearer ${env.GITHUB_TOKEN}`, accept, "x-github-api-version": env.GITHUB_API_VERSION || "2022-11-28", "user-agent": "github-api-mcp-cloudflare-worker", "content-type": "application/json" };
 }
 async function executeTool(name: string, args: any, env: Env): Promise<unknown> {
+  if (name === "github_actions_read_logs") return inspectActionsLogs(args, env);
   if (name === "github_rest_request" || name.startsWith("github_get_") || name.startsWith("github_post_") || name.startsWith("github_put_") || name.startsWith("github_patch_") || name.startsWith("github_delete_") || name.startsWith("github_head_")) {
     const tools = await getRestTools();
     const generated = tools.find(t => t.name === name);
@@ -222,7 +284,7 @@ export default {
       if (rpc.method === "ping") return json({ jsonrpc: "2.0", id, result: {} });
       if (rpc.method === "tools/list") {
         const [rest, gql] = await Promise.all([getRestTools(), getGraphqlTools(env)]);
-        const all = [...rest, ...gql].sort((a, b) => a.name.localeCompare(b.name));
+        const all = [...rest, ...gql, actionsLogsTool()].sort((a, b) => a.name.localeCompare(b.name));
         const pageSize = Math.min(100, Math.max(1, Number(env.MCP_TOOL_PAGE_SIZE || 80)));
         const offset = Math.max(0, Number.parseInt(rpc.params?.cursor || "0", 10) || 0);
         return json({ jsonrpc: "2.0", id, result: { tools: all.slice(offset, offset + pageSize), ...(offset + pageSize < all.length ? { nextCursor: String(offset + pageSize) } : {}) } });
