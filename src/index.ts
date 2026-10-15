@@ -24,6 +24,7 @@ const GRAPHQL_INTROSPECTION = `query MCPRootSchema {
 const BASE_SCHEMA = { type: "object", properties: {}, additionalProperties: true } as const;
 let restCache: { at: number; tools: Tool[] } | undefined;
 let gqlCache: { at: number; tools: Tool[] } | undefined;
+let gqlArgTypeCache: Record<string, Record<string, string>> = {};
 const CACHE_MS = 30 * 60 * 1000;
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -92,6 +93,7 @@ function restFallbackTool(): Tool {
   return { name: "github_rest_request", description: "Universal GitHub REST fallback. Invoke any GitHub REST route, including routes missing from OpenAPI. Provide method, path (for example /repos/OWNER/REPO/actions/runs/RUN_ID/logs), query object, and optional JSON body. Binary responses are returned as base64 when within the response limit.", inputSchema: { type: "object", properties: { method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] }, path: { type: "string", description: "Path under api.github.com, starting with /; never include a hostname" }, query: { type: "object", additionalProperties: true }, body: {}, accept: { type: "string" } }, required: ["method", "path"], additionalProperties: false } };
 }
 function unwrapType(t: any): any { while (t?.ofType) t = t.ofType; return t || {}; }
+function graphqlTypeString(t: any): string { if (t?.kind === "NON_NULL") return graphqlTypeString(t.ofType) + "!"; if (t?.kind === "LIST") return "[" + graphqlTypeString(t.ofType) + "]"; return t?.name || "String"; }
 async function getGraphqlTools(env: Env): Promise<Tool[]> {
   if (gqlCache && Date.now() - gqlCache.at < CACHE_MS) return gqlCache.tools;
   try {
@@ -100,15 +102,17 @@ async function getGraphqlTools(env: Env): Promise<Tool[]> {
     const schema = payload.data?.__schema;
     if (!schema) throw new Error("GraphQL introspection unavailable");
     const tools: Tool[] = [];
+    gqlArgTypeCache = {};
     for (const [kind, root] of [["query", schema.queryType], ["mutation", schema.mutationType]] as any[]) {
       if (!root?.fields) continue;
       for (const f of root.fields) {
+        gqlArgTypeCache[`${kind}:${f.name}`] = Object.fromEntries((f.args || []).map((a: any) => [a.name, graphqlTypeString(a.type)]));
         const properties: Record<string, unknown> = {};
         const required: string[] = [];
         for (const a of f.args || []) {
           const t = unwrapType(a.type);
-          const type = t.name === "Int" || t.name === "Float" ? "number" : t.name === "Boolean" ? "boolean" : t.name === "String" || t.name === "ID" ? "string" : "string";
-          properties[a.name] = { type, description: a.description || `GraphQL argument ${a.name} (${t.name || "input object"}); complex inputs may be supplied as JSON strings or via github_graphql_request.` };
+          const type = t.name === "Int" || t.name === "Float" ? "number" : t.name === "Boolean" ? "boolean" : t.kind === "INPUT_OBJECT" ? "object" : t.kind === "LIST" ? "array" : "string";
+          properties[a.name] = { type, ...(type === "object" ? { additionalProperties: true } : type === "array" ? { items: {} } : {}), description: a.description || `GraphQL argument ${a.name} (${t.name || "input object"}); arbitrary nested inputs are also accepted by github_graphql_request.` };
           if (a.type?.kind === "NON_NULL") required.push(a.name);
         }
         properties.selection = { type: "string", description: "Optional GraphQL selection set, e.g. { id name url }; nested fields and advanced directives are best expressed with github_graphql_request." };
@@ -242,7 +246,7 @@ async function executeTool(name: string, args: any, env: Env): Promise<unknown> 
       const field = name.replace(/^github_graphql_(query|mutation)_/, "");
       const rootType = name.includes("_mutation_") ? "mutation" : "query";
       const argPairs = Object.entries(args).filter(([k]) => !["selection", "variables"].includes(k));
-      const declarations = argPairs.map(([k, v]) => `$${k}: ${typeof v === "number" ? "Int" : typeof v === "boolean" ? "Boolean" : "String"}`).join(", ");
+      const declarations = argPairs.map(([k, v]) => `${k}: ${gqlArgTypeCache[`${rootType}:${field}`]?.[k] || (typeof v === "number" ? "Int" : typeof v === "boolean" ? "Boolean" : typeof v === "object" ? "JSON" : "String")}`).join(", ");
       const uses = argPairs.map(([k]) => `${k}: $${k}`).join(", ");
       const selection = args.selection || (rootType === "query" ? "{ __typename }" : "{ clientMutationId }");
       query = `${rootType === "mutation" ? "mutation" : "query"} MCPGenerated${declarations ? `(${declarations})` : ""} { ${field}${uses ? `(${uses})` : ""} ${selection} }`;
